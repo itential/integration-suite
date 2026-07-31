@@ -1,0 +1,13 @@
+name: integration-suite
+type: platform-app
+active: false
+status: community
+compatibility:
+  - platform
+description: An app for managing Itential integrations
+tags:
+  - app
+maintainer:
+  - dtsmith99 < @dtsmith99
+repo: https://github.com/itential/integration-suite
+docs: https://github.com/itential/integration-suite/blob/main/README.md
