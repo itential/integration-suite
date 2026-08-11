@@ -1,0 +1,16 @@
+{
+  "name": "@itential/app-integration_health_monitor",
+  "version": "1.0.0",
+  "description": "Custom Itential Platform app that periodically calls a configured task/route on each adapter or integration instance and tracks whether it's responding correctly.",
+  "main": "src.js",
+  "scripts": {
+    "test": "echo \"no tests yet\" && exit 0",
+    "lint:errors": "echo \"no linter configured\" && exit 0"
+  },
+  "dependencies": {
+    "mongodb": "^5.9.2",
+    "axios": "^1.7.7"
+  },
+  "author": "Itential",
+  "license": "ISC"
+}

@@ -1,0 +1,121 @@
+{
+  "id": "@itential/app-integration_health_monitor",
+  "title": "health-monitor",
+  "export": "HealthMonitor",
+  "type": "Application",
+  "summary": "Configurable health checks for adapters and integrations, on a schedule",
+  "version": "1.0.0",
+  "src": "src.js",
+  "encrypted": false,
+  "icon": "img/icon.png",
+  "roles": ["admin", "health_monitor_user"],
+  "uiDirectories": ["ui/dist"],
+  "methods": [
+    {
+      "name": "listTargets",
+      "summary": "Best-effort list of installed adapter/integration/app instances",
+      "description": "Read from the service_configs collection as a convenience for populating the Add Check form - see src.js for caveats",
+      "task": true,
+      "input": [],
+      "output": { "type": "array", "name": "targets" },
+      "route": { "verb": "GET", "path": "/targets" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "getIntegrationOperations",
+      "summary": "List the operations an Integration's own OpenAPI model defines",
+      "description": "Looks up the target's model via service_configs.properties.type -> integration_models.versionId and returns its operations, plus any operation marked x-health-monitor-default (set from the OpenAPI Editor's Operations tab), for the Add/Edit Check form's operation picker. Not meaningful for adapters/apps in this version - returns an empty list rather than an error for those.",
+      "task": true,
+      "input": [{ "name": "serviceName", "type": "string" }],
+      "output": { "type": "object", "name": "result", "description": "{ versionId, defaultOperation: {method,path}|null, operations: array }" },
+      "route": { "verb": "GET", "path": "/targets/:serviceName/operations" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "listChecks",
+      "summary": "List all configured health checks with their latest status",
+      "task": true,
+      "input": [],
+      "output": { "type": "array", "name": "checks" },
+      "route": { "verb": "GET", "path": "/checks" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "getCheck",
+      "summary": "Get a single health check config + status by id",
+      "task": true,
+      "input": [{ "name": "checkId", "type": "string" }],
+      "output": { "type": "object", "name": "check" },
+      "route": { "verb": "GET", "path": "/checks/:checkId" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "createCheck",
+      "summary": "Create a new health check configuration",
+      "task": true,
+      "input": [{ "name": "config", "type": "object" }],
+      "output": { "type": "object", "name": "check" },
+      "route": { "verb": "POST", "path": "/checks" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "updateCheck",
+      "summary": "Update an existing health check configuration",
+      "task": true,
+      "input": [
+        { "name": "checkId", "type": "string" },
+        { "name": "config", "type": "object" }
+      ],
+      "output": { "type": "object", "name": "check" },
+      "route": { "verb": "PUT", "path": "/checks/:checkId" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "deleteCheck",
+      "summary": "Delete a health check configuration",
+      "task": true,
+      "input": [{ "name": "checkId", "type": "string" }],
+      "output": { "type": "object", "name": "result" },
+      "route": { "verb": "DELETE", "path": "/checks/:checkId" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "runCheckNow",
+      "summary": "Immediately execute one health check out of band and record its result",
+      "task": true,
+      "input": [{ "name": "checkId", "type": "string" }],
+      "output": { "type": "object", "name": "status" },
+      "route": { "verb": "POST", "path": "/checks/:checkId/run" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "restartTarget",
+      "summary": "Restart the adapter or app a check targets (stop then start)",
+      "description": "Calls Itential Platform's own PUT /adapters/{name}/stop + /start (or /applications/{name}/... for Apps) for the check's configured target. Not offered for Integration targets - restarting a process is not a concept that applies to them.",
+      "task": true,
+      "input": [{ "name": "checkId", "type": "string" }],
+      "output": { "type": "object", "name": "result", "description": "{ success: boolean, status: string, message: string }" },
+      "route": { "verb": "POST", "path": "/checks/:checkId/restart" },
+      "roles": ["admin", "health_monitor_user"]
+    },
+    {
+      "name": "encryptValue",
+      "summary": "Encrypt a plaintext value using IAP's own PropertyEncryption module",
+      "description": "Admin utility: returns the $ENC...-encrypted form of a plaintext value, the same encryption this app now applies automatically to a check's authPassword/authToken/oauth.clientSecret before storing it. Useful for producing an $ENC... string to paste into this (or any other app's) Service Instance properties by hand, e.g. mongoProps.password or platformProps.oauth.clientSecret, instead of leaving them as plaintext. Does not persist anything.",
+      "task": true,
+      "input": [{ "name": "value", "type": "string" }],
+      "output": { "type": "object", "name": "result", "description": "{ encrypted: string }" },
+      "route": { "verb": "POST", "path": "/encrypt-value" },
+      "roles": ["admin"]
+    }
+  ],
+  "views": [
+    {
+      "path": "/",
+      "template": "index.html",
+      "title": "Health Monitor",
+      "icon": "/health-monitor/img/icon.png",
+      "roles": ["admin", "health_monitor_user"]
+    }
+  ]
+}
