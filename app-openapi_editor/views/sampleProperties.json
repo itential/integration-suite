@@ -1,0 +1,24 @@
+{
+  "id": "@itential/app-openapi_editor",
+  "mongoProps": {
+    "host": "127.0.0.1",
+    "port": 27017,
+    "database": "itential-master",
+    "username": "",
+    "password": "",
+    "ssl": false
+  },
+  "platformProps": {
+    "baseUrl": "http://127.0.0.1:3000",
+    "authMode": "oauth2",
+    "username": "",
+    "password": "",
+    "oauth": {
+      "tokenUrl": "https://your-auth-provider.example.com/oauth/token",
+      "clientId": "",
+      "clientSecret": "",
+      "scope": "",
+      "audience": ""
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@itential/app-openapi_editor",
+  "version": "1.0.0",
+  "description": "Custom Itential Platform app for viewing and editing OpenAPI Integration Model documents stored in MongoDB (integration_models collection).",
+  "main": "src.js",
+  "scripts": {
+    "test": "echo \"no tests yet\" && exit 0",
+    "lint:errors": "echo \"no linter configured\" && exit 0"
+  },
+  "dependencies": {
+    "mongodb": "^5.9.2",
+    "@apidevtools/swagger-parser": "^10.1.1",
+    "axios": "^1.6.7"
+  },
+  "author": "Itential",
+  "license": "ISC"
+}

@@ -1,0 +1,156 @@
+{
+  "id": "@itential/app-openapi_editor",
+  "title": "openapi-editor",
+  "export": "OpenApiEditor",
+  "type": "Application",
+  "summary": "View and edit OpenAPI specs stored in the integration_models MongoDB collection",
+  "version": "1.0.0",
+  "src": "src.js",
+  "encrypted": false,
+  "icon": "img/icon.png",
+  "roles": ["admin", "openapi_editor_user"],
+  "uiDirectories": ["ui/dist"],
+  "methods": [
+    {
+      "name": "listModels",
+      "summary": "List all OpenAPI integration models",
+      "description": "Returns id, title, version for every document in integration_models",
+      "task": true,
+      "input": [],
+      "output": {
+        "type": "array",
+        "name": "models",
+        "description": "Array of { id, title, version, versionId }"
+      },
+      "route": {
+        "verb": "GET",
+        "path": "/models"
+      },
+      "roles": ["admin", "openapi_editor_user"]
+    },
+    {
+      "name": "getModel",
+      "summary": "Get a single OpenAPI model document by id",
+      "description": "Returns the full OpenAPI 3.0 document for the given _id",
+      "task": true,
+      "input": [
+        { "name": "modelId", "type": "string" }
+      ],
+      "output": {
+        "type": "object",
+        "name": "spec",
+        "description": "Full OpenAPI document"
+      },
+      "route": {
+        "verb": "GET",
+        "path": "/models/:modelId"
+      },
+      "roles": ["admin", "openapi_editor_user"]
+    },
+    {
+      "name": "validateModel",
+      "summary": "Validate an OpenAPI document without saving it",
+      "description": "Runs the document through swagger-parser validation and returns any errors",
+      "task": true,
+      "input": [
+        { "name": "spec", "type": "object" }
+      ],
+      "output": {
+        "type": "object",
+        "name": "result",
+        "description": "{ valid: boolean, errors: array }"
+      },
+      "route": {
+        "verb": "POST",
+        "path": "/models/validate"
+      },
+      "roles": ["admin", "openapi_editor_user"]
+    },
+    {
+      "name": "createModel",
+      "summary": "Create a brand-new integration model",
+      "description": "Validates the incoming spec, confirms no model with the same versionId (title+version) already exists, then creates it via Itential Platform's own POST /integration-models - the sanctioned create call. Does NOT create an Integration instance; use Itential's normal process to add an instance against the new model afterward.",
+      "task": true,
+      "input": [
+        { "name": "spec", "type": "object" }
+      ],
+      "output": {
+        "type": "object",
+        "name": "result",
+        "description": "{ success: boolean, steps: array, versionId: string, model: string, modelId: string, errors: array }"
+      },
+      "route": {
+        "verb": "POST",
+        "path": "/models"
+      },
+      "roles": ["admin", "openapi_editor_user"]
+    },
+    {
+      "name": "getUpdateImpact",
+      "summary": "Preview what saving this model would affect, without changing anything",
+      "description": "Read-only: returns the model's associated Integration instances (if any) and a full backup payload, so the UI can warn the user and offer a backup download before Save runs the delete/reapply/recreate process.",
+      "task": true,
+      "input": [
+        { "name": "modelId", "type": "string" }
+      ],
+      "output": {
+        "type": "object",
+        "name": "impact",
+        "description": "{ versionId, model, associatedIntegrations: array, backup: object }"
+      },
+      "route": {
+        "verb": "GET",
+        "path": "/models/:modelId/update-impact"
+      },
+      "roles": ["admin", "openapi_editor_user"]
+    },
+    {
+      "name": "saveModel",
+      "summary": "Update an integration model via Itential's own sanctioned process",
+      "description": "Validates the incoming spec, then performs the delete-dependent-instances / delete-model / reapply-model / recreate-instances sequence via Itential Platform's own Integration Model and Integrations REST APIs (Basic auth) - NOT a direct Mongo write - since Platform 6 has no supported in-place update for a model with existing instances.",
+      "task": true,
+      "input": [
+        { "name": "modelId", "type": "string" },
+        { "name": "spec", "type": "object" }
+      ],
+      "output": {
+        "type": "object",
+        "name": "result",
+        "description": "{ success: boolean, steps: array, versionId: string, errors: array, backup: object }"
+      },
+      "route": {
+        "verb": "PUT",
+        "path": "/models/:modelId"
+      },
+      "roles": ["admin", "openapi_editor_user"]
+    },
+    {
+      "name": "testRequest",
+      "summary": "Execute a test HTTP call against a real target server, server-side",
+      "description": "Runs an ad hoc request (built from the OpenAPI document's servers/paths) from this app's own cog process rather than the browser, so it is never subject to browser CORS restrictions. Supports None/Basic/Bearer/OAuth2 auth overrides, an optional curl execution path, and skipping TLS certificate verification.",
+      "task": true,
+      "input": [
+        { "name": "config", "type": "object" }
+      ],
+      "output": {
+        "type": "object",
+        "name": "result",
+        "description": "{ status, statusText, headers, data, timeMs }"
+      },
+      "route": {
+        "verb": "POST",
+        "path": "/test-request"
+      },
+      "roles": ["admin", "openapi_editor_user"]
+    }
+  ],
+  "views": [
+    {
+      "path": "/",
+      "template": "index.html",
+      "title": "OpenAPI Editor",
+      "icon": "/openapi-editor/img/icon.png",
+      "roles": ["admin", "openapi_editor_user"]
+    }
+  ]
+}
