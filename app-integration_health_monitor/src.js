@@ -162,6 +162,44 @@ HealthMonitor.prototype._encryptCheckSecrets = function _encryptCheckSecrets(con
 };
 
 /**
+ * Read-side counterpart to _encryptForStorage, generalized so it can be used
+ * anywhere a value MIGHT be a manually-pasted $ENC...-encrypted string - not
+ * just the check-level credential-path lookup in _resolveTargetCredentials
+ * (which had its own inline copy of this same enc.newDecryption() call).
+ * Used below to cover this app's OWN Service Instance properties
+ * (mongoProps.password, platformProps.password/authToken/oauth.clientSecret)
+ * - fields that were previously read completely raw, meaning an admin who
+ * pasted an $ENC... value into one of them (per this app's own
+ * encryptValue-based instructions) would have had the literal ciphertext
+ * sent as the actual password/token, breaking auth. This closes that gap.
+ *
+ * Values NOT starting with "$ENC" are returned unchanged - this covers both
+ * plaintext values (still fully supported) and values already decrypted
+ * transparently by Platform itself before this app ever saw them, which is
+ * what happens for any property declared in propertiesDecorators.json when
+ * HashiCorp Vault is configured (those arrive here as plain strings, with no
+ * $SECRET_/$ENC prefix at all - Platform decrypts them upstream, so no
+ * app-side handling is needed or possible for that path).
+ *
+ * Fails closed (throws) if a value IS $ENC-prefixed but can't be decrypted,
+ * for the same reason _encryptForStorage fails closed on the write side:
+ * silently falling back to the raw ciphertext string as if it were the real
+ * secret is worse than a loud, clear startup/connection error.
+ */
+HealthMonitor.prototype._decryptIfEnc = function _decryptIfEnc(value) {
+  if (typeof value !== 'string' || !value.startsWith('$ENC')) return value;
+  const enc = this._getPropertyEncryption();
+  if (!enc) {
+    throw new Error('Value is $ENC-encrypted, but IAP\'s PropertyEncryption module could not be loaded (pronghornProps.encryptionKey unavailable, or @itential/itential-utils not found at the expected path) - cannot decrypt it.');
+  }
+  try {
+    return enc.newDecryption(value);
+  } catch (err) {
+    throw new Error(`Failed to decrypt an $ENC-prefixed value: ${err.message}`);
+  }
+};
+
+/**
  * Simple dot-path resolver for reading a nested value out of a raw Mongo
  * document (e.g. "properties.properties.authentication.basicAuth.password").
  */
@@ -194,8 +232,14 @@ HealthMonitor.prototype._getDb = function _getDb() {
     database: process.env.HEALTH_MONITOR_MONGO_DB || 'itential-master',
   };
 
+  // Transparently decrypt a manually-pasted $ENC... password (see
+  // _decryptIfEnc) - a plaintext password, or one Platform already
+  // decrypted itself via propertiesDecorators.json + Vault, passes through
+  // unchanged.
+  const mongoPassword = this._decryptIfEnc(props.password);
+
   const auth = props.username
-    ? `${encodeURIComponent(props.username)}:${encodeURIComponent(props.password)}@`
+    ? `${encodeURIComponent(props.username)}:${encodeURIComponent(mongoPassword)}@`
     : '';
   const uri = `mongodb://${auth}${props.host}:${props.port}/${props.database}`;
 
@@ -248,7 +292,7 @@ HealthMonitor.prototype._getDb = function _getDb() {
  */
 HealthMonitor.prototype._getPlatformConfig = function _getPlatformConfig() {
   const instanceProps = this._getInstanceProps();
-  return instanceProps.platformProps || {
+  const platform = instanceProps.platformProps || {
     baseUrl: process.env.HEALTH_MONITOR_PLATFORM_URL || 'http://127.0.0.1:3000',
     authMode: process.env.HEALTH_MONITOR_AUTH_MODE || 'query',
     authToken: process.env.HEALTH_MONITOR_AUTH_TOKEN || '',
@@ -262,6 +306,22 @@ HealthMonitor.prototype._getPlatformConfig = function _getPlatformConfig() {
       audience: process.env.HEALTH_MONITOR_OAUTH_AUDIENCE || '',
     },
   };
+
+  // Transparently decrypt any of these three fields if a manually-pasted
+  // $ENC... value is present (see _decryptIfEnc) - plaintext, or a value
+  // Platform already decrypted itself via propertiesDecorators.json + Vault,
+  // passes through unchanged. This is what actually lets platformProps use
+  // either encryption path: Vault-backed automatic decoration (Platform
+  // decrypts before this app ever sees it - nothing to do here) or the
+  // manual $ENC/PropertyEncryption fallback (decrypted right here, fresh on
+  // every call - never cached in encrypted form).
+  return Object.assign({}, platform, {
+    authToken: this._decryptIfEnc(platform.authToken),
+    password: this._decryptIfEnc(platform.password),
+    oauth: Object.assign({}, platform.oauth, {
+      clientSecret: this._decryptIfEnc((platform.oauth || {}).clientSecret),
+    }),
+  });
 };
 
 /**
@@ -318,13 +378,17 @@ HealthMonitor.prototype._getAuthToken = function _getAuthToken(platform, forceRe
     const stillValid = this._cachedToken && this._cachedTokenExpiresAt && Date.now() < this._cachedTokenExpiresAt;
     if (stillValid) return Promise.resolve(this._cachedToken);
     if (!oauth.tokenUrl || !oauth.clientId || !oauth.clientSecret) return Promise.resolve(null);
-    return fetchOAuthToken(oauth)
+    return fetchOAuthToken(oauth, platform.insecureTLS)
       .then(({ token, expiresAt }) => {
         this._cachedToken = token;
         this._cachedTokenExpiresAt = expiresAt;
         return token;
       })
-      .catch(() => null); // token endpoint unreachable/misconfigured - fall through, request will 401 and surface a clear error
+      // Token endpoint unreachable/misconfigured (including a TLS handshake
+      // failure against a self-signed tokenUrl if platformProps.insecureTLS
+      // isn't set) - falls through to "no token", so the request will 401
+      // against Platform with a clear-enough message to point back here.
+      .catch(() => null);
   }
 
   if (this._cachedToken) return Promise.resolve(this._cachedToken);
@@ -332,7 +396,15 @@ HealthMonitor.prototype._getAuthToken = function _getAuthToken(platform, forceRe
   if (!platform.username) return Promise.resolve(platform.authToken || null);
 
   const base = String(platform.baseUrl || '').replace(/\/+$/, '');
-  return axios.post(`${base}/login`, { user: { username: platform.username, password: platform.password } }, { timeout: 8000 })
+  return axios.post(`${base}/login`, { user: { username: platform.username, password: platform.password } }, {
+    timeout: 8000,
+    // Same platformProps.insecureTLS toggle the actual check requests
+    // already honored (via config.insecureTLS in sendRequest/curl) - this
+    // covers self-signed certs on Platform's OWN baseUrl for
+    // Adapter/App-targeted checks, which previously had no way to skip
+    // verification even though Integration-targeted checks already did.
+    httpsAgent: platform.insecureTLS ? INSECURE_HTTPS_AGENT : undefined,
+  })
     .then((response) => {
       const token = response.data && (response.data.token || response.data.access_token || response.data.jwt_token);
       this._cachedToken = token || null;
@@ -388,11 +460,50 @@ function trimSlashes(value) {
 }
 
 /**
+ * The `name` field in a service_configs document (e.g. "ConfigurationManager")
+ * is a display name, NOT the route segment IAP's own web server expects for
+ * that Adapter/App's proxy route or its Admin restart route (confirmed live:
+ * a document with `name: "ConfigurationManager"` and
+ * `model: "@itential/app-configuration_manager"` only responds correctly at
+ * `/configuration_manager/...`, not `/ConfigurationManager/...`). The real
+ * segment is derived from `model` instead: strip the `@itential/` scope,
+ * then the `app-`/`app_`/`adapter-`/`adapter_` family prefix, and what's
+ * left is the actual route segment. Falls back to the raw name if `model`
+ * is missing or doesn't match the expected shape, so a target this doesn't
+ * recognize still behaves exactly as it did before this fix (i.e. degrades
+ * to the old, sometimes-wrong-but-sometimes-right behavior rather than
+ * breaking outright).
+ */
+function deriveRouteSegment(model, fallbackName) {
+  if (typeof model === 'string' && model) {
+    const afterScope = model.replace(/^@itential\//i, '');
+    const stripped = afterScope.replace(/^(app|adapter)[-_]/i, '');
+    if (stripped && stripped !== afterScope) return stripped;
+  }
+  return fallbackName;
+}
+
+/**
+ * Looks up an Adapter/App's own service_configs document by its display
+ * name (what's stored as `serviceName` on a check) and resolves the real
+ * route segment from its `model` field - see deriveRouteSegment above. Done
+ * fresh on every call (not cached) so a check keeps working even if the
+ * target's model/name changes without the check itself being re-saved.
+ */
+HealthMonitor.prototype._resolveAdapterAppRouteSegment = function _resolveAdapterAppRouteSegment(serviceName) {
+  return this._getDb()
+    .then((db) => db.collection('service_configs').findOne({ name: serviceName }, { projection: { model: 1 } }))
+    .then((doc) => deriveRouteSegment(doc && doc.model, serviceName));
+};
+
+/**
  * Build the target URL defensively - a trailing slash on baseUrl or a
  * leading/trailing slash on serviceName previously produced a double slash
  * (e.g. ".../meraki-adapter//organizations"), which some routers 404 on
  * even though the route itself exists. This is the ADAPTER path: adapters
  * are reached through IAP's own web server as a generic proxy route.
+ * `config.serviceName` here is expected to ALREADY be the resolved route
+ * segment (see _resolveAdapterAppRouteSegment), not the raw display name.
  */
 function buildAdapterUrl(platform, config) {
   const base = String(platform.baseUrl || '').replace(/\/+$/, ''); // keep protocol, drop trailing slash only
@@ -450,7 +561,8 @@ HealthMonitor.prototype._resolveCheckUrl = function _resolveCheckUrl(platform, c
     return this._getIntegrationServer(config.serviceName).then((base) => `${base}${path}`);
   }
 
-  return Promise.resolve(buildAdapterUrl(platform, config));
+  return this._resolveAdapterAppRouteSegment(config.serviceName)
+    .then((segment) => buildAdapterUrl(platform, Object.assign({}, config, { serviceName: segment })));
 };
 
 /**
@@ -666,18 +778,11 @@ HealthMonitor.prototype._resolveTargetCredentials = function _resolveTargetCrede
         if (raw === undefined) {
           throw new Error(`Credential path "${dotPath}" did not resolve to anything in "${config.serviceName}"'s service_configs document - double-check it against the real document shape.`);
         }
-        if (typeof raw === 'string' && raw.startsWith('$ENC')) {
-          const enc = this._getPropertyEncryption();
-          if (!enc) {
-            throw new Error(`Value at "${dotPath}" is $ENC-encrypted, but IAP's PropertyEncryption module could not be loaded (pronghornProps.encryptionKey unavailable, or @itential/itential-utils not found at the expected path) - cannot decrypt it.`);
-          }
-          try {
-            return enc.newDecryption(raw);
-          } catch (err) {
-            throw new Error(`Failed to decrypt value at "${dotPath}": ${err.message}`);
-          }
+        try {
+          return this._decryptIfEnc(raw);
+        } catch (err) {
+          throw new Error(`Failed to resolve value at "${dotPath}": ${err.message}`);
         }
-        return raw;
       };
       return {
         username: resolveOne(paths.username, literal.username),
@@ -924,10 +1029,22 @@ HealthMonitor.prototype.listTargets = function listTargets(callback) {
     .then((docs) => {
       const seen = new Set();
       const targets = docs
-        .map((doc) => ({
-          name: doc.name,
-          type: classifyTargetType(doc),
-        }))
+        .map((doc) => {
+          const type = classifyTargetType(doc);
+          return {
+            name: doc.name,
+            type,
+            // For Adapters/Apps, this is the ACTUAL route segment IAP uses
+            // (derived from `model`, see deriveRouteSegment) - not the
+            // display name above. Exposed so the Add/Edit Check form can
+            // show an accurate request-preview instead of one built from
+            // the display name, which is what config.serviceName looks
+            // like in the dropdown but is NOT what ends up in the URL.
+            // null for integrations, which resolve their URL a completely
+            // different way (their own configured server, not this).
+            routeSegment: type === 'integration' ? null : deriveRouteSegment(doc.model, doc.name),
+          };
+        })
         .filter((t) => {
           if (!t.name || seen.has(t.name)) return false;
           seen.add(t.name);
@@ -1182,19 +1299,31 @@ HealthMonitor.prototype.runCheckNow = function runCheckNow(checkId, callback) {
 HealthMonitor.prototype._restartService = function _restartService(name, targetType, callback) {
   const platform = this._getPlatformConfig();
   const base = String(platform.baseUrl || '').replace(/\/+$/, '');
-  const segment = targetType === 'app' ? 'applications' : 'adapters';
+  const routeGroup = targetType === 'app' ? 'applications' : 'adapters';
   const authConfig = platform.username
     ? { auth: { username: platform.username, password: platform.password } }
     : {};
 
-  const call = (verb) => axios.put(`${base}/${segment}/${encodeURIComponent(name)}/${verb}`, {}, {
-    timeout: 15000,
-    ...authConfig,
-  });
+  // `name` here is the display name stored on the check (service_configs'
+  // own `name` field, e.g. "ConfigurationManager") - resolve the real route
+  // segment from that document's `model` field before calling, same fix as
+  // _resolveCheckUrl/_resolveAdapterAppRouteSegment above. Restarting with
+  // the raw display name 404s exactly like the check request itself did.
+  this._resolveAdapterAppRouteSegment(name).then((segment) => {
+    const call = (verb) => axios.put(`${base}/${routeGroup}/${encodeURIComponent(segment)}/${verb}`, {}, {
+      timeout: 15000,
+      // Same platformProps.insecureTLS toggle used for token/login calls and
+      // for the actual check requests - restarting an Adapter/App hits
+      // Platform's own baseUrl too, so it needs the same self-signed-cert
+      // escape hatch.
+      httpsAgent: platform.insecureTLS ? INSECURE_HTTPS_AGENT : undefined,
+      ...authConfig,
+    });
 
-  call('stop')
-    .then(() => new Promise((resolve) => { setTimeout(resolve, 1500); }))
-    .then(() => call('start'))
+    return call('stop')
+      .then(() => new Promise((resolve) => { setTimeout(resolve, 1500); }))
+      .then(() => call('start'));
+  })
     .then((res) => {
       callback({
         success: true,

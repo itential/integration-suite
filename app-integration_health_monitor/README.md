@@ -12,6 +12,104 @@ Everything - which call to use per target, and how often to run it - is
 configured from this app's own UI. No pronghorn.json edits or platform
 restarts are needed to add or change a check.
 
+## Adapter/App route segment vs. display name
+
+Confirmed live: an Adapter or App's `service_configs.name` field (the value
+shown in the Add/Edit Check target dropdown, e.g. `ConfigurationManager`) is
+a **display name**, not the URL segment IAP's own web server actually routes
+on for that target's proxy route (`/<segment>/...`) or its Admin restart
+route (`/applications/<segment>/stop`, `/adapters/<segment>/stop`). The real
+segment is derived from that same document's `model` field instead (e.g.
+`@itential/app-configuration_manager` -> `configuration_manager`).
+`_resolveAdapterAppRouteSegment()` does this lookup+derivation fresh on
+every check run and every restart, so existing checks self-heal without
+needing to be re-saved once you're on a build with this fix. If a target's
+`model` field doesn't follow the `@itential/app-<name>` /
+`@itential/adapter-<name>` pattern, this falls back to the raw display name
+(the old, sometimes-wrong behavior) rather than breaking outright - if you
+hit that case, check `deriveRouteSegment()` in `src.js`.
+
+## Self-signed certificates
+
+Set `platformProps.insecureTLS: true` to skip TLS certificate verification
+on every call this app makes to Platform's own `baseUrl` on behalf of an
+Adapter or App target - the `/login` call (`authMode` username/password),
+the OAuth2 client-credentials token fetch (`authMode: "oauth2"`), and the
+Restart action's stop/start calls. This was previously only possible for
+Integration targets, which have always honored a per-check `insecureTLS`
+flag for the actual health-check request itself; Adapter/App targets had no
+equivalent for the platform-level auth/restart calls, which is fixed by this
+flag. Per-check `insecureTLS` (set on an individual check) still controls
+the actual health-check HTTP request for ANY target type, independent of
+this platform-wide flag - use whichever applies to the certificate you're
+actually working around.
+
+## Encrypting secrets - two supported paths
+
+This app never requires plaintext credentials to sit unprotected once one of
+the two paths below is in place. Both are supported at the same time (for
+different fields, or as a fallback for environments without Vault) - just
+don't use both on the SAME field, since Platform will not double-encrypt and
+an admin who pastes an already-`$ENC...` value into a field Vault is also
+managing risks re-encrypting ciphertext-as-plaintext.
+
+### Path 1 - Automatic, Vault-backed (recommended, needs HashiCorp Vault)
+
+`propertiesSchema.json` and `propertiesDecorators.json` ship at the root of
+this app, alongside `pronghorn.json`. `propertiesDecorators.json` marks these
+fields for automatic encryption:
+
+- `/mongoProps/password`
+- `/platformProps/password`
+- `/platformProps/authToken`
+- `/platformProps/oauth/clientSecret`
+
+If your Platform instance has Vault configured, an admin just types the
+plaintext value into these fields in Admin Essentials (or via the config API)
+and saves as normal - Platform stores the value in Vault, never in Mongo, and
+hands this app back the decrypted plaintext at runtime. Nothing in this app's
+own code has to run for this path to work; it's entirely Platform-side. If
+Vault is NOT configured on your instance, Platform ignores the decorators and
+just saves plaintext as before - fall back to Path 2 below.
+
+### Path 2 - Manual, $ENC/PropertyEncryption (works without Vault)
+
+Every field the Vault decorators cover, PLUS this app's own `health_checks`
+documents (`authPassword`, `authToken`, `oauth.clientSecret` on a check), can
+also be manually encrypted with this app's `encryptValue` admin utility
+(`POST /health-monitor/encrypt-value`, `{"value": "the-plaintext-secret"}`).
+It returns an `$ENC...`-prefixed string using IAP's own `PropertyEncryption`
+module (the same mechanism IAP's core has used since before Vault-backed
+encryption existed) - paste that string into the property instead of the
+plaintext, and this app decrypts it transparently on every read.
+
+`src.js`'s `_decryptIfEnc()` is called wherever a value that might be
+`$ENC...`-prefixed gets used: `_getDb()` (mongoProps.password),
+`_getPlatformConfig()` (platformProps.password/authToken/oauth.clientSecret),
+and `_resolveTargetCredentials()` (a check's own `credentialPaths`, reading a
+target integration's own `service_configs` document). Plaintext values, and
+values Platform already decrypted itself via Path 1, pass through unchanged -
+`_decryptIfEnc` only acts on strings that actually start with `$ENC`.
+
+`createCheck`/`updateCheck` go the other direction: `_encryptCheckSecrets()`
+runs a check's `authPassword`/`authToken`/`oauth.clientSecret` through
+`_encryptForStorage()` before every write to `health_checks`, so this app's
+own bespoke collection (which Path 1's decorators can't reach - those only
+apply to Service Instance properties, not to Mongo documents this app writes
+itself) never has plaintext secrets land on disk either.
+
+**Not yet confirmed live**: `_encryptForStorage`'s encrypt method name
+(`newEncryption`/`encrypt`/`newEncrypt`, tried in that order) - the decrypt
+side (`enc.newDecryption()`) is confirmed working against a real Platform 6
+instance; the mirrored encrypt name hasn't been. If none of the three names
+match your build, `_encryptForStorage` throws an error naming all three it
+tried. Run this on the server to get the real name and update the
+`candidateMethods` list in `src.js`:
+
+```
+node -e "const { PropertyEncryption } = require('/opt/itential/platform/server/node_modules/@itential/itential-utils'); console.log(Object.getOwnPropertyNames(PropertyEncryption.prototype));"
+```
+
 ## Structure
 
 ```

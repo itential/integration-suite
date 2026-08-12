@@ -175,6 +175,19 @@ export default function CheckForm({ initial, targets = [], onSave, onCancel }) {
   // instead of showing every installed instance regardless of type.
   const targetsForType = targets.filter((t) => normalizeTargetType(t.type) === form.targetType);
 
+  // The dropdown shows/sends the target's DISPLAY name (service_configs'
+  // own `name` field, e.g. "ConfigurationManager") - that's what's actually
+  // saved as serviceName, since that's what other lookups (restart,
+  // credential paths) key off. But for Adapters/Apps, the real HTTP request
+  // this app sends goes to a DIFFERENT segment derived from the target's
+  // `model` field (e.g. "configuration_manager") - see
+  // _resolveAdapterAppRouteSegment in src.js. This finds that resolved
+  // segment (already computed server-side in listTargets) purely so the
+  // request preview below can show the truth instead of the display name.
+  const selectedTarget = targets.find((t) => t.name === form.serviceName);
+  const previewSegment = (form.targetType !== 'integration' && selectedTarget && selectedTarget.routeSegment)
+    || form.serviceName;
+
   const handleTargetTypeChange = (value) => {
     setForm((prev) => ({ ...prev, targetType: value, serviceName: '' }));
   };
@@ -326,12 +339,20 @@ export default function CheckForm({ initial, targets = [], onSave, onCancel }) {
           <p className="form-hint">
             The full request will be sent to
             {' '}
-            <code>{`${form.serviceName || '<serviceName>'}${form.path.startsWith('/') ? form.path : `/${form.path}`}`}</code>
+            <code>{`${previewSegment || '<serviceName>'}${form.path.startsWith('/') ? form.path : `/${form.path}`}`}</code>
             {' '}
             on the platform&apos;s own web server - use whatever lightweight,
             side-effect-free task/route already exists on that adapter or
             integration (a &quot;ping&quot; or simple read-only call works
             best).
+            {form.targetType !== 'integration' && selectedTarget && selectedTarget.routeSegment
+              && selectedTarget.routeSegment !== form.serviceName && (
+              <>
+                {' '}
+                (resolved from &quot;{form.serviceName}&quot;&apos;s registered package id -
+                the actual request never uses the display name shown in the dropdown above.)
+              </>
+            )}
           </p>
 
           {form.targetType === 'integration' && form.serviceName && (
@@ -698,28 +719,29 @@ export default function CheckForm({ initial, targets = [], onSave, onCancel }) {
             </p>
           )}
 
-          {form.targetType === 'integration' && (
-            <>
-              <label className="form-checkbox">
-                <input
-                  type="checkbox"
-                  checked={!!form.insecureTLS}
-                  onChange={(e) => update('insecureTLS', e.target.checked)}
-                />
-                Skip TLS certificate verification (self-signed/untrusted cert)
-              </label>
-              {form.insecureTLS && (
-                <p className="form-hint">
-                  Applies to both the OAuth2 token request and the check
-                  request itself. Use this when the integration&apos;s own
-                  config shows <code>tls.rejectUnauthorized: false</code>
-                  (common for internal/self-signed HTTPS endpoints, including
-                  IAP&apos;s own REST API over HTTPS) - without it, the
-                  request will fail with a certificate error before auth is
-                  even evaluated.
-                </p>
-              )}
-            </>
+          <label className="form-checkbox">
+            <input
+              type="checkbox"
+              checked={!!form.insecureTLS}
+              onChange={(e) => update('insecureTLS', e.target.checked)}
+            />
+            Skip TLS certificate verification (self-signed/untrusted cert)
+          </label>
+          {form.insecureTLS && (
+            <p className="form-hint">
+              Applies to the check request itself (and, for an Integration
+              target with its own OAuth2 auth, that token request too). Use
+              this when the target&apos;s own config shows
+              <code>tls.rejectUnauthorized: false</code> (common for
+              internal/self-signed HTTPS endpoints, including IAP&apos;s own
+              REST API over HTTPS) - without it, the request will fail with a
+              certificate error before auth is even evaluated. For an
+              Adapter/App target, this only covers the check request itself -
+              if Platform&apos;s own <code>baseUrl</code> also uses a
+              self-signed cert for login/OAuth2/restart calls, set
+              <code>platformProps.insecureTLS</code> in this app&apos;s
+              Service Instance properties too.
+            </p>
           )}
 
           <div className="modal-actions">
