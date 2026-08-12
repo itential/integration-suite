@@ -1,6 +1,0 @@
-[
-  { "type": "encryption", "pointer": "/mongoProps/password" },
-  { "type": "encryption", "pointer": "/platformProps/password" },
-  { "type": "encryption", "pointer": "/platformProps/authToken" },
-  { "type": "encryption", "pointer": "/platformProps/oauth/clientSecret" }
-]

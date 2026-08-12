@@ -698,29 +698,28 @@ export default function CheckForm({ initial, targets = [], onSave, onCancel }) {
             </p>
           )}
 
-          <label className="form-checkbox">
-            <input
-              type="checkbox"
-              checked={!!form.insecureTLS}
-              onChange={(e) => update('insecureTLS', e.target.checked)}
-            />
-            Skip TLS certificate verification (self-signed/untrusted cert)
-          </label>
-          {form.insecureTLS && (
-            <p className="form-hint">
-              Applies to the check request itself (and, for an Integration
-              target with its own OAuth2 auth, that token request too). Use
-              this when the target&apos;s own config shows
-              <code>tls.rejectUnauthorized: false</code> (common for
-              internal/self-signed HTTPS endpoints, including IAP&apos;s own
-              REST API over HTTPS) - without it, the request will fail with a
-              certificate error before auth is even evaluated. For an
-              Adapter/App target, this only covers the check request itself -
-              if Platform&apos;s own <code>baseUrl</code> also uses a
-              self-signed cert for login/OAuth2/restart calls, set
-              <code>platformProps.insecureTLS</code> in this app&apos;s
-              Service Instance properties too.
-            </p>
+          {form.targetType === 'integration' && (
+            <>
+              <label className="form-checkbox">
+                <input
+                  type="checkbox"
+                  checked={!!form.insecureTLS}
+                  onChange={(e) => update('insecureTLS', e.target.checked)}
+                />
+                Skip TLS certificate verification (self-signed/untrusted cert)
+              </label>
+              {form.insecureTLS && (
+                <p className="form-hint">
+                  Applies to both the OAuth2 token request and the check
+                  request itself. Use this when the integration&apos;s own
+                  config shows <code>tls.rejectUnauthorized: false</code>
+                  (common for internal/self-signed HTTPS endpoints, including
+                  IAP&apos;s own REST API over HTTPS) - without it, the
+                  request will fail with a certificate error before auth is
+                  even evaluated.
+                </p>
+              )}
+            </>
           )}
 
           <div className="modal-actions">

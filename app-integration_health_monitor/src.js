@@ -162,44 +162,6 @@ HealthMonitor.prototype._encryptCheckSecrets = function _encryptCheckSecrets(con
 };
 
 /**
- * Read-side counterpart to _encryptForStorage, generalized so it can be used
- * anywhere a value MIGHT be a manually-pasted $ENC...-encrypted string - not
- * just the check-level credential-path lookup in _resolveTargetCredentials
- * (which had its own inline copy of this same enc.newDecryption() call).
- * Used below to cover this app's OWN Service Instance properties
- * (mongoProps.password, platformProps.password/authToken/oauth.clientSecret)
- * - fields that were previously read completely raw, meaning an admin who
- * pasted an $ENC... value into one of them (per this app's own
- * encryptValue-based instructions) would have had the literal ciphertext
- * sent as the actual password/token, breaking auth. This closes that gap.
- *
- * Values NOT starting with "$ENC" are returned unchanged - this covers both
- * plaintext values (still fully supported) and values already decrypted
- * transparently by Platform itself before this app ever saw them, which is
- * what happens for any property declared in propertiesDecorators.json when
- * HashiCorp Vault is configured (those arrive here as plain strings, with no
- * $SECRET_/$ENC prefix at all - Platform decrypts them upstream, so no
- * app-side handling is needed or possible for that path).
- *
- * Fails closed (throws) if a value IS $ENC-prefixed but can't be decrypted,
- * for the same reason _encryptForStorage fails closed on the write side:
- * silently falling back to the raw ciphertext string as if it were the real
- * secret is worse than a loud, clear startup/connection error.
- */
-HealthMonitor.prototype._decryptIfEnc = function _decryptIfEnc(value) {
-  if (typeof value !== 'string' || !value.startsWith('$ENC')) return value;
-  const enc = this._getPropertyEncryption();
-  if (!enc) {
-    throw new Error('Value is $ENC-encrypted, but IAP\'s PropertyEncryption module could not be loaded (pronghornProps.encryptionKey unavailable, or @itential/itential-utils not found at the expected path) - cannot decrypt it.');
-  }
-  try {
-    return enc.newDecryption(value);
-  } catch (err) {
-    throw new Error(`Failed to decrypt an $ENC-prefixed value: ${err.message}`);
-  }
-};
-
-/**
  * Simple dot-path resolver for reading a nested value out of a raw Mongo
  * document (e.g. "properties.properties.authentication.basicAuth.password").
  */
@@ -232,14 +194,8 @@ HealthMonitor.prototype._getDb = function _getDb() {
     database: process.env.HEALTH_MONITOR_MONGO_DB || 'itential-master',
   };
 
-  // Transparently decrypt a manually-pasted $ENC... password (see
-  // _decryptIfEnc) - a plaintext password, or one Platform already
-  // decrypted itself via propertiesDecorators.json + Vault, passes through
-  // unchanged.
-  const mongoPassword = this._decryptIfEnc(props.password);
-
   const auth = props.username
-    ? `${encodeURIComponent(props.username)}:${encodeURIComponent(mongoPassword)}@`
+    ? `${encodeURIComponent(props.username)}:${encodeURIComponent(props.password)}@`
     : '';
   const uri = `mongodb://${auth}${props.host}:${props.port}/${props.database}`;
 
@@ -292,7 +248,7 @@ HealthMonitor.prototype._getDb = function _getDb() {
  */
 HealthMonitor.prototype._getPlatformConfig = function _getPlatformConfig() {
   const instanceProps = this._getInstanceProps();
-  const platform = instanceProps.platformProps || {
+  return instanceProps.platformProps || {
     baseUrl: process.env.HEALTH_MONITOR_PLATFORM_URL || 'http://127.0.0.1:3000',
     authMode: process.env.HEALTH_MONITOR_AUTH_MODE || 'query',
     authToken: process.env.HEALTH_MONITOR_AUTH_TOKEN || '',
@@ -306,22 +262,6 @@ HealthMonitor.prototype._getPlatformConfig = function _getPlatformConfig() {
       audience: process.env.HEALTH_MONITOR_OAUTH_AUDIENCE || '',
     },
   };
-
-  // Transparently decrypt any of these three fields if a manually-pasted
-  // $ENC... value is present (see _decryptIfEnc) - plaintext, or a value
-  // Platform already decrypted itself via propertiesDecorators.json + Vault,
-  // passes through unchanged. This is what actually lets platformProps use
-  // either encryption path: Vault-backed automatic decoration (Platform
-  // decrypts before this app ever sees it - nothing to do here) or the
-  // manual $ENC/PropertyEncryption fallback (decrypted right here, fresh on
-  // every call - never cached in encrypted form).
-  return Object.assign({}, platform, {
-    authToken: this._decryptIfEnc(platform.authToken),
-    password: this._decryptIfEnc(platform.password),
-    oauth: Object.assign({}, platform.oauth, {
-      clientSecret: this._decryptIfEnc((platform.oauth || {}).clientSecret),
-    }),
-  });
 };
 
 /**
@@ -378,7 +318,7 @@ HealthMonitor.prototype._getAuthToken = function _getAuthToken(platform, forceRe
     const stillValid = this._cachedToken && this._cachedTokenExpiresAt && Date.now() < this._cachedTokenExpiresAt;
     if (stillValid) return Promise.resolve(this._cachedToken);
     if (!oauth.tokenUrl || !oauth.clientId || !oauth.clientSecret) return Promise.resolve(null);
-    return fetchOAuthToken(oauth, platform.insecureTLS)
+    return fetchOAuthToken(oauth)
       .then(({ token, expiresAt }) => {
         this._cachedToken = token;
         this._cachedTokenExpiresAt = expiresAt;
@@ -392,15 +332,7 @@ HealthMonitor.prototype._getAuthToken = function _getAuthToken(platform, forceRe
   if (!platform.username) return Promise.resolve(platform.authToken || null);
 
   const base = String(platform.baseUrl || '').replace(/\/+$/, '');
-  return axios.post(`${base}/login`, { user: { username: platform.username, password: platform.password } }, {
-    timeout: 8000,
-    // Same platformProps.insecureTLS toggle the actual check requests
-    // already honored (via config.insecureTLS in sendRequest/curl) - this
-    // covers self-signed certs on Platform's OWN baseUrl for
-    // Adapter/App-targeted checks, which previously had no way to skip
-    // verification even though Integration-targeted checks already did.
-    httpsAgent: platform.insecureTLS ? INSECURE_HTTPS_AGENT : undefined,
-  })
+  return axios.post(`${base}/login`, { user: { username: platform.username, password: platform.password } }, { timeout: 8000 })
     .then((response) => {
       const token = response.data && (response.data.token || response.data.access_token || response.data.jwt_token);
       this._cachedToken = token || null;
@@ -734,11 +666,18 @@ HealthMonitor.prototype._resolveTargetCredentials = function _resolveTargetCrede
         if (raw === undefined) {
           throw new Error(`Credential path "${dotPath}" did not resolve to anything in "${config.serviceName}"'s service_configs document - double-check it against the real document shape.`);
         }
-        try {
-          return this._decryptIfEnc(raw);
-        } catch (err) {
-          throw new Error(`Failed to resolve value at "${dotPath}": ${err.message}`);
+        if (typeof raw === 'string' && raw.startsWith('$ENC')) {
+          const enc = this._getPropertyEncryption();
+          if (!enc) {
+            throw new Error(`Value at "${dotPath}" is $ENC-encrypted, but IAP's PropertyEncryption module could not be loaded (pronghornProps.encryptionKey unavailable, or @itential/itential-utils not found at the expected path) - cannot decrypt it.`);
+          }
+          try {
+            return enc.newDecryption(raw);
+          } catch (err) {
+            throw new Error(`Failed to decrypt value at "${dotPath}": ${err.message}`);
+          }
         }
+        return raw;
       };
       return {
         username: resolveOne(paths.username, literal.username),
@@ -1250,11 +1189,6 @@ HealthMonitor.prototype._restartService = function _restartService(name, targetT
 
   const call = (verb) => axios.put(`${base}/${segment}/${encodeURIComponent(name)}/${verb}`, {}, {
     timeout: 15000,
-    // Same platformProps.insecureTLS toggle used for token/login calls and
-    // for the actual check requests - restarting an Adapter/App hits
-    // Platform's own baseUrl too, so it needs the same self-signed-cert
-    // escape hatch.
-    httpsAgent: platform.insecureTLS ? INSECURE_HTTPS_AGENT : undefined,
     ...authConfig,
   });
 

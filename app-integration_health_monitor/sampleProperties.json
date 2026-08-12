@@ -1,25 +1,51 @@
 {
-  "id": "@itential/app-integration_health_monitor",
-  "mongoProps": {
-    "host": "127.0.0.1",
-    "port": 27017,
-    "database": "itential-master",
-    "username": "",
-    "password": "",
-    "ssl": false
-  },
-  "platformProps": {
-    "baseUrl": "http://127.0.0.1:3000",
-    "authMode": "oauth2",
-    "authToken": "",
-    "username": "",
-    "password": "",
-    "oauth": {
-      "tokenUrl": "https://your-auth-provider.example.com/oauth/token",
-      "clientId": "",
-      "clientSecret": "",
-      "scope": "",
-      "audience": ""
+  "loggerProps": {
+    "log_max_files": 100,
+    "log_max_file_size": 1048576,
+    "log_level": "info",
+    "log_directory": "/var/log/itential",
+    "log_filename": "HealthMonitor.log",
+    "console_level": "warn",
+    "syslog": {
+      "level": "warning",
+      "host": "localhost",
+      "port": 514,
+      "protocol": "udp4",
+      "facility": "local0",
+      "type": "BSD",
+      "path": "/dev/log",
+      "pid": "process.pid",
+      "localhost": "localhost",
+      "app_name": "process.title",
+      "eol": ""
     }
-  }
+  },
+  "properties": {
+    "mongoProps": {
+      "host": "127.0.0.1",
+      "port": 27017,
+      "database": "itential-monitor",
+      "username": "itential",
+      "password": "$ENC95b2602639a5613b:2f7757c6a1ce07cc8a08ecbb017c15e5",
+      "ssl": false
+    },
+    "platformProps": {
+      "baseUrl": "https://127.0.0.1:3443",
+      "authMode": "oauth2",
+      "authToken": "",
+      "username": "",
+      "password": "",
+      "oauth": {
+        "tokenUrl": "https://127.0.0.1:3443/oauth/token",
+        "clientId": "6a7b9dcc2345dd6e0210b4a3",
+        "clientSecret": "$ENCfae242f03eaa84cf1dbd1771bc247823fe17235f28346f3d277d4852493762dc6dfe64a6:4f5ce0932c76b6619ed0c320c5cfd19f",
+        "scope": "",
+        "audience": ""
+      }
+    }
+  },
+  "model": "@itential/app-integration_health_monitor",
+  "name": "HealthMonitor",
+  "type": "Application",
+  "isEncrypted": false
 }
