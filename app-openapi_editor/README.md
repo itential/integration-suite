@@ -1,410 +1,359 @@
-# app-openapi_editor
+# OpenAPI Editor for Itential Platform 6
 
-A custom Itential Platform application for viewing and editing the OpenAPI
-documents IAP stores for Integration Models, in the `integration_models`
-MongoDB collection. The UI is a Swagger-Editor-style split view: raw JSON on
-the left, and the same live-updating rendered API documentation you'd see on
-editor.swagger.io on the right (via `swagger-ui-react`), inside an Itential-
-styled shell (navy/teal sidebar and topbar).
+A custom Itential Platform 6 application for viewing, editing, validating,
+testing, and safely updating the OpenAPI documents behind Itential's
+**Integration Models**, and for managing the **Integration Instances** built
+from them — all from one screen, without hand-editing JSON in Mongo or
+juggling multiple Admin Essentials pages.
 
-Supports both OpenAPI 3.0.x and 3.1.0 documents.
+> **Why this exists.** Itential Platform's Integration Models and Integration
+> Instances are powerful, but working with them day-to-day — tweaking an
+> operation, testing a call against a real target, safely re-publishing a
+> model that already has instances attached, or backing one up before a risky
+> change — normally means moving between Admin Essentials screens and raw API
+> calls with no safety net. This app is a purpose-built productivity layer on
+> top of Itential's own sanctioned APIs, aimed at the people who work with
+> Integration Models and Instances regularly and want fewer chances to make an
+> unrecoverable mistake.
 
-## Structure
+`[SCREENSHOT: Full app screen showing the model list sidebar on the left and
+the JSON editor open on the right, with the toolbar (Validate / Backup /
+Restore / Save / Delete) visible at the top]`
 
-```
-app-openapi_editor/
-├── package.json          # cog's npm package manifest
-├── pronghorn.json        # tells IAP this is an app: methods, routes, view
-├── src.js                # the cog - server-side logic, Mongo access
-├── sampleProperties.json # example service instance configuration
-├── img/icon.png          # app icon shown in the IAP nav (Itential mark)
-├── views/                # live template copy (see "Known deployment quirk" below)
-└── ui/                    # React presentation layer
-    ├── package.json
-    ├── webpack.config.js
-    ├── src/
-    │   ├── index.html / index.jsx / App.jsx / styles.css / mockData.js
-    │   ├── api.js               # fetch wrapper for the cog's REST routes
-    │   ├── assets/itential-icon.png
-    │   └── components/
-    │       ├── Sidebar.jsx      # model list + search, Itential brand mark
-    │       ├── Editor.jsx       # raw JSON editor pane
-    │       └── Preview.jsx      # swagger-ui-react live rendered preview
-    └── dist/              # pre-built production bundle (already built)
-```
+---
+
+## Table of contents
+
+1. [What it does](#what-it-does)
+2. [Architecture, in brief](#architecture-in-brief)
+3. [Installation](#installation)
+4. [Configuration reference](#configuration-reference)
+5. [Using the app](#using-the-app)
+6. [Security](#security)
+7. [Troubleshooting](#troubleshooting)
+8. [Uninstalling](#uninstalling)
+
+---
 
 ## What it does
 
-- **List** (`GET /openapi-editor/models`) — sidebar of every OpenAPI document
-  in `integration_models`, showing title + version.
-- **View** (`GET /openapi-editor/models/:modelId`) — loads one document,
-  split into `{ spec, meta }` (see "Spec vs. meta fields" below).
-- **Validate** (`POST /openapi-editor/models/validate`) — runs the in-progress
-  edit through `@apidevtools/swagger-parser` without saving, so a user can
-  check for errors before committing. Works for OpenAPI 3.0.x and 3.1.0.
-- **Test** (`POST /openapi-editor/test-request`) — runs an ad hoc request
-  against a real target server, server-side (from the cog process, not the
-  browser) — see "Testing operations without CORS" below.
-- **Save** (`GET /openapi-editor/models/:modelId/update-impact` then
-  `PUT /openapi-editor/models/:modelId`) — updates the model via Itential
-  Platform's own sanctioned process (delete/reapply/recreate), not a direct
-  Mongo write — see "Updating a model — the sanctioned process" below.
+- **Browse and edit Integration Models** — a searchable list of every model
+  on the platform, opened into a real JSON code editor (not a plain
+  textarea) with syntax highlighting and inline error markers.
+- **Validate** a model against the OpenAPI 3.0/3.1 spec before saving, with
+  the specific error, its severity, and the line it's on called out — plus a
+  clear reminder that a failed validation doesn't necessarily mean the model
+  or its instances won't work; it means you should test before relying on it.
+- **Save** a model through Itential's own sanctioned update sequence
+  (Platform has no supported in-place update for a model with existing
+  instances — this app handles the delete/reapply/recreate dance for you and
+  shows you every step).
+- **Backup and Restore** — a full model, on demand, before you touch it.
+  Restores go back through the same sanctioned create path, never a raw
+  database write.
+- **Delete** a model (and, optionally, its instances) with a type-to-confirm
+  safety step — no accidental deletes.
+- **Create a new model from scratch**, or **Import** one from a JSON file
+  someone hands you.
+- **Integration Instances tab** — list, create, edit, back up, restore, and
+  delete the instances tied to a model, in the same screen as the model
+  itself.
+- **Test panel** — fire a real HTTP request at a target server, from the
+  app's own server process (not your browser, so it's never blocked by
+  CORS), with Basic/Bearer/OAuth2/two-step-login auth overrides and an
+  optional raw-`curl` execution path for diagnosing Node/axios-specific
+  request quirks.
+- **Operations tab** — pick which operation in a model should be used as its
+  "default health check call" (a marker the companion Integration Health
+  Monitor app reads automatically), and clean up/preview an operation before
+  testing it.
 
-## Spec vs. meta fields
+`[SCREENSHOT: Operations tab showing an operation selected as the default
+health check call, with the marker/badge visible]`
 
-The real `integration_models` documents carry fields that are **not** part of
-the OpenAPI spec itself: `_id` (Mongo's document id) and `versionId` (an
-Itential-derived string like `"MockServer API:1.0.0"`). This app keeps both
-out of the editable JSON entirely:
+## Architecture, in brief
 
-- `getModel` returns `{ spec, meta }` — `spec` is the pure OpenAPI document
-  (safe to feed straight to the JSON editor, a validator, or `swagger-ui-react`);
-  `meta` is `{ id, versionId, model }`.
-- The editor/preview panes only ever see `spec`. The topbar displays
-  `meta.versionId` read-only next to the title.
-- `saveModel` takes only the edited `spec` and recomputes `versionId` from
-  `spec.info.title` + `spec.info.version` so it can never drift out of sync
-  with an edited title/version — but see below, it no longer writes this
-  straight to Mongo.
+This app talks to Itential Platform in two different ways, and which one
+applies depends on what you're doing:
 
-## Updating a model — the sanctioned process
+- **Model and Integration Instance reads/writes** (list, get, create, save,
+  backup, restore, delete — both for models and for instances) go directly
+  from your browser to Platform's own REST API (`/integration-models`,
+  `/integrations`), using your own logged-in session cookie. Nothing is
+  proxied through this app's backend, and no separate Platform credential is
+  required for these operations — you're acting as yourself, with your own
+  permissions, exactly as if you'd used Admin Essentials directly.
+- **Validation and the Test panel's request execution** run server-side, in
+  this app's own cog process, so they aren't subject to browser CORS
+  restrictions and can reach targets your browser can't. This is also where
+  `platformProps`/`mongoProps` (see below) come in, for the small number of
+  legacy/optional code paths that still need a standing credential rather
+  than your session.
 
-**This app used to `updateOne` the Mongo document directly on Save.** That
-writes the document correctly, but Itential Platform has **no supported
-in-place update** for an integration model that has existing Integration
-instances built on it — calling Itential's own `PUT /integration-models`
-against such a model returns an error like:
+Practically: most day-to-day use needs **no Service Instance properties
+configured at all** beyond an empty `{}` — you'll only need to fill in
+`platformProps`/`mongoProps` if you use the Test panel's advanced auth
+options or hit one of the legacy fallback paths called out below.
 
-```
-Cannot update model IAP REST API2:1.0.3 due to 1 existing integration instance(s).
-```
+## Installation
 
-Itential's own tooling handles this by: deleting every dependent Integration
-instance, deleting the model, re-importing (`PUT`) the updated model, then
-recreating each deleted instance. A direct Mongo write skips all of that —
-which is exactly why editing a model, wire structure aside, previously left
-a "clean up function" undone. `saveModel` now performs this same sequence,
-via Itential's own real REST API (all confirmed against
-`docs.itential.com/itential-platform/6/api-reference/`, both the
-`integration-models` and `integrations` categories):
+### Option A — RPM (recommended for production)
 
-1. Read the current model document (need its *old* `versionId`).
-2. Find every Integration instance built from this model - a direct,
-   read-only Mongo lookup matching each instance's own
-   `service_configs.properties.type` against the model's `versionId`. This
-   is the field that actually links an instance to its model (confirmed
-   against a real document - `integration_models` itself carries no `model`
-   field at all, an earlier assumption based on IAP's API reference example
-   turned out wrong). An instance's own top-level `model` string is in turn
-   always exactly `"@itential/adapter_" + versionId` (confirmed against
-   several real examples), so it's derived (`deriveModelIdentifier()`)
-   rather than trusted from a stored field.
-3. `DELETE /integrations/{name}` for each dependent instance. **All-or-
-   nothing**: if any of these fail, the process stops here without touching
-   the model at all, and reports exactly which instance(s) blocked it.
-4. `DELETE /integration-models/{versionId}` — deletes the model itself,
-   identified by its *old* `versionId` (this is the same identifier IAP's
-   own error message above uses).
-5. `PUT /integration-models` with `{ model: <edited spec> }` — reapplies
-   (recreates) the model. Note there's no `{id}` in this path; Itential
-   matches/creates by the spec's own `info.title`/`info.version` internally.
-6. Computes the **new** `versionId`/`model` identifier directly from the
-   edited spec (its version suffix changes if `info.version` changed).
-7. `POST /integrations` to recreate each deleted instance, using its backed-
-   up `properties`/`type`/`isEncrypted`/`description`/`loggerProps`, but
-   with **both** its top-level `model` string **and** its nested
-   `properties.type` updated to the new versionId/model (that nested field
-   is the real link, per step 2 above — both need to match the recreated
-   model or the instance won't resolve to it). **Best-effort**: every
-   instance is attempted even if one fails, since the model is already
-   replaced by this point — getting instances back matters more than
-   stopping on one error.
-
-Every step's outcome is recorded and returned to the UI (`{ success, steps,
-versionId, errors, backup }`), and the full `backup` (the original spec +
-every dependent instance's raw config) is always included in the response —
-even on failure — so nothing is unrecoverable.
-
-**The UI surfaces all of this before anything happens.** Clicking Save first
-calls `GET /openapi-editor/models/:modelId/update-impact` (read-only) and
-shows a confirmation modal listing exactly which Integration instances would
-be deleted/recreated, with a **"Download backup"** button that saves the
-same payload as a JSON file to your machine before you confirm. After
-confirming, the same modal shows a step-by-step result list (✓/✗ per step)
-so a partial failure is immediately visible and diagnosable, with the backup
-still downloadable from the result screen.
-
-## Creating a new model
-
-The **+ New Model** button in the sidebar opens a blank editor pre-filled
-with a minimal valid OpenAPI skeleton (`openapi`, `info.title`/`version`,
-an empty `servers`/`paths`) rather than loading an existing document.
-Clicking **Create Model** (Save's label while in this mode) is a much
-simpler motion than updating an existing model: there are no dependent
-Integration instances to warn about, back up, delete, or recreate, so this
-skips the confirmation modal entirely and calls `POST /openapi-editor/models`
-directly, which:
-
-1. Validates the spec (same `@apidevtools/swagger-parser` check as Validate).
-2. Confirms no existing model already has the same `versionId`
-   (`info.title` + `info.version` must be unique) - a clear error if so,
-   rather than silently colliding.
-3. Calls Itential's own `POST /integration-models` — the sanctioned create
-   endpoint - with `{ model: spec }`. There is no delete/reapply/recreate
-   dance here (2.4's whole reason for existing): a brand-new model has no
-   instances yet, so plain creation is already the correct, sanctioned path.
-
-**This intentionally does not create an Integration instance.** Creating a
-model and creating an instance of that model are two separate, independently
--sanctioned actions in Itential Platform - this app's scope is the model
-definition itself. After a successful create, the UI shows an explicit
-message telling the user to create an instance for the new model using
-Itential's own normal process (e.g. Admin Essentials → Integrations → Add),
-the same way they would for any other existing model.
-
-## Operations tab: browse, test, and clean up in one place
-
-The **Operations** tab (next to Preview and Test) merges browsing/cleanup
-into one unified view - a companion to the standalone Test tab below
-(both remain available; Operations added a merged option, it didn't
-replace Test). It lists every
-operation grouped by category/tag, exactly the same grouping
-`swagger-ui-react` uses in the Preview pane, but each category and
-operation is interactive:
-
-- A search box filters by method, path, summary, or category.
-- Each category has a select-all checkbox, and collapses/expands via its
-  own caret (independent of the checkbox, so browsing and selecting don't
-  interfere with each other).
-- Each operation row has its own removal checkbox, plus an expand toggle
-  that reveals its parameters (name/in/required/description) and documented
-  responses (status code + description) - the same information the Preview
-  pane's per-operation detail view shows, without leaving this tab.
-- That same expanded row also has a full test-and-send form: path
-  parameters, a query-params JSON box, a request body box where
-  applicable, and a Send button with the result (status/timing/body) shown
-  right there.
-
-This list is deliberately a separate, purpose-built component rather than
-checkboxes/test controls injected directly into the Preview pane itself:
-`swagger-ui-react` is a third-party rendering library with no supported way
-to add interactive controls into its own rendered rows. Preview remains
-the polished, read-only rendered view (and updates live as you type, same
-as always); Operations is where you actually interact with individual
-calls.
-
-**Shared test settings.** A collapsible "Test settings" panel above the
-operation list holds the server base URL, custom headers, and auth
-mode (None/Basic/Bearer/OAuth2/Login request) - configured once and used
-by every operation's Send button below, so you're not re-entering auth for
-each call you want to try. The **Login request** mode is a two-step flow
-for APIs that issue a token from a separate login call (e.g. POST
-username/password, get a token back) rather than a standard OAuth2
-client-credentials grant: you configure the login sub-request itself
-(method, URL, headers, body), a dot-path into its JSON response for where
-the token lives (e.g. `data.access_token`), and how the real request
-should carry it - a header (any name/prefix, not just
-`Authorization: Bearer`) or a query parameter. All test requests run
-**server-side**, inside this app's own cog process
-(`POST /openapi-editor/test-request`), not in the browser - the browser
-only ever talks to this app's own same-origin route, so browser CORS never
-applies, the same as the old Test tab.
-
-**Removing operations.** Checking operations doesn't change anything by
-itself - nothing happens until you click **Apply removals to editor**, at
-which point the selected operations are removed from the spec's `paths`,
-any path left with no HTTP methods at all is removed entirely, and any
-`tags` entry no longer referenced by a remaining operation is pruned too.
-This only rewrites the editor's in-memory JSON (marking it dirty, same as
-any manual edit) - it does **not** touch Mongo or call the platform API.
-You still need to click **Save** afterward to actually persist the change
-via the sanctioned update process (2.4 above).
-
-Because the operation list is derived from the same live-parsed spec as
-everything else in the app, editing the JSON in the left-hand editor
-updates the Operations list automatically on every keystroke (as soon as
-the document is valid JSON again) - there's no separate refresh or re-sync
-step.
-
-## Backend (cog) notes
-
-- Uses the plain `mongodb` Node.js driver against the `integration_models`
-  collection for reads and for the read-only "find associated integrations"
-  lookup — but no longer for writes; see "Updating a model" above.
-- Uses `@apidevtools/swagger-parser` (not the older, less maintained
-  `swagger-parser` package) specifically because it validates OpenAPI 3.1.0
-  documents in addition to 3.0.x.
-- Mongo connection details come from a process-wide implicit global named
-  `service_config`, set by IAP's own `ServiceBootstrap.js` — specifically
-  `service_config.properties.mongoProps`. This was confirmed against a live
-  Platform 6 instance; **this is not documented anywhere and may differ
-  across IAP versions** - if this app throws `ReferenceError: service_config
-  is not defined` or a Mongo auth error on your build, check how a sibling
-  adapter/app already installed on your box accesses its own properties and
-  match that instead.
-- **New requirement: `platformProps`.** Since `saveModel` now calls
-  Itential's own REST API instead of writing to Mongo directly, this app's
-  Service Instance properties must also include a `platformProps` block.
-  Itential's own docs specify Basic auth for these routes, but on this
-  environment Basic auth returned 401 even with valid credentials - use
-  `authMode: "oauth2"` instead:
-  ```json
-  "platformProps": {
-    "baseUrl": "http://127.0.0.1:3000",
-    "authMode": "oauth2",
-    "oauth": {
-      "tokenUrl": "https://your-auth-provider.example.com/oauth/token",
-      "clientId": "...",
-      "clientSecret": "...",
-      "scope": "",
-      "audience": ""
-    }
-  }
-  ```
-  The OAuth2 token is fetched via the standard client-credentials grant,
-  cached in memory until near expiry, and automatically retried once with a
-  fresh token if a call comes back 401 (the token simply expiring mid-save
-  shouldn't fail the whole process). `authMode: "basic"` (with
-  `username`/`password`) is still supported and is what IAP's own API
-  reference documents as the default - use it if your environment's account
-  actually accepts Basic auth against `/integration-models`/`/integrations`,
-  which was not the case here.
-- **`oauth.clientId`/`oauth.clientSecret` (and `password`, for Basic mode)
-  can be stored as `$ENC...`-encrypted values instead of plaintext** in this
-  app's own Service Instance properties - decrypted fresh on every use via
-  the same `@itential/itential-utils` `PropertyEncryption` mechanism (and
-  `pronghornProps.encryptionKey`) already proven out for
-  `app-integration_health_monitor`'s credential decryption feature. Nothing
-  decrypted is ever persisted; a plain (non-`$ENC`) value passes through
-  unchanged, so this is fully optional.
-
-  To produce an `$ENC` value for one of these fields, run this on the
-  Platform 6 host itself (same encryption key this app's own process
-  already has access to via `pronghornProps`):
-  ```bash
-  node -e "
-    const { PropertyEncryption } = require('/opt/itential/platform/server/node_modules/@itential/itential-utils');
-    const enc = new PropertyEncryption({}, process.env.IAP_ENCRYPTION_KEY);
-    console.log(enc.newEncryption('your-plaintext-secret-here'));
-  "
-  ```
-  (substitute your platform's actual encryption key however your build
-  exposes it - `pronghornProps.encryptionKey` isn't set as a plain env var
-  by default; check how a working adapter/integration's own encrypted
-  properties were generated on your instance for the exact incantation).
-  Paste the resulting `$ENC...` string directly into `oauth.clientSecret`
-  (etc.) in Admin Essentials in place of the plaintext value.
-- Configure Mongo + platform credentials under Admin Essentials →
-  Applications → openapi-editor → Service Instance → Properties, using
-  `sampleProperties.json` as a starting shape (the actual nesting must match
-  what your IAP build's `createServiceConfig()` produces — again, use a
-  working sibling app's properties file as the template if in doubt).
-- `saveModel` always re-validates server-side (never trusts the client),
-  even though the UI also calls `/validate` proactively.
-
-## Frontend notes
-
-- React 18, bundled with Webpack.
-- **Preview pane uses `swagger-ui-react`** — the same rendering engine
-  editor.swagger.io uses — so the right-hand pane looks and behaves like the
-  real Swagger Editor, updating live as you type in the left pane. Its own
-  top bar is hidden via CSS (`.swagger-preview-pane .swagger-ui .topbar`)
-  since our Itential topbar already sits above it.
-- **Editor pane is a real JSON code editor** (CodeMirror 6, via
-  `@uiw/react-codemirror` + `@codemirror/lang-json` + `@codemirror/lint`),
-  not a plain `<textarea>`: JSON syntax highlighting, live syntax-error
-  checking (a gutter marker + squiggly underline appears at the exact spot a
-  document stops being valid JSON, in addition to the existing parse-error
-  banner), and code folding — click the triangles in the left gutter to
-  collapse any object or array (an entire `paths` block, one operation,
-  a deeply nested schema, etc.) down to a single line.
-- Colors/typography approximate Itential's navy (#0B1F3A) + teal/blue accent
-  brand palette with Open Sans/Montserrat type, and the sidebar mark is
-  Itential's actual public logo icon (pulled from itential.com). Confirm
-  against your org's current design tokens before shipping broadly —
-  Platform's own UI has been migrating to a newer design system ("Mosaic")
-  and colors may have shifted since this was built.
-- If no live IAP backend is reachable (e.g. running `npm start` for pure UI
-  iteration), the app automatically falls back to bundled mock data
-  (`mockData.js`) and shows a "Demo data" pill, so the UI remains fully
-  explorable standalone.
-
-## Research note: reducing/eliminating the platformProps requirement
-
-Investigated whether this app could reuse Platform 6's own internal
-service-to-service authentication instead of requiring its own
-separately-configured `platformProps` (OAuth2 client or Basic credentials).
-No confirmed, documented internal mechanism for a custom app to borrow the
-platform's own system-level credentials was found via Itential's public API
-reference or general documentation - `platformProps` (a dedicated service
-account, OAuth2 or Basic) currently appears to be the supported way for a
-custom app to call Platform 6's own REST API.
-
-The one lower-lift alternative worth prototyping in a future session: since
-every request into this app's own routes already carries the logged-in
-user's own session (cookie/`Authorization` header, via
-`credentials: 'include'` in `api.js`), it may be possible for the cog to
-forward that same incoming credential on its outbound call to
-`/integration-models`/`/integrations`, instead of maintaining a separate
-service account. This depends on whether this app's pronghorn `task: true`
-methods can access the raw incoming request/response objects (current
-methods here only declare their business-logic input parameters) - that
-needs to be confirmed against how this specific Platform 6 build's app
-framework exposes `req`/`res` to a method, if at all, before it's worth
-building out. Flagged as a next-step research item, not yet implemented.
-
-## Known deployment quirk: view template path
-
-IAP resolves a view's `template` relative to the app's `views/` directory,
-not wherever `uiDirectories` points. This package's `pronghorn.json` sets
-`"template": "index.html"`, and a **copy** of the built `index.html` +
-`bundle.js` + icon PNG is kept in `views/` alongside the real build in
-`ui/dist/` (which is what the browser actually loads its JS bundle from, per
-the `publicPath` baked into `webpack.config.js`). If you rebuild the UI,
-remember to copy the new `ui/dist/*` files into `views/` too, or IAP will
-serve a stale `index.html` shell.
-
-## Build & install
+A self-contained ("fat") RPM ships with this release: the app's production
+`npm` dependencies are already installed and bundled inside it, and its UI is
+already built. Installing it requires **no network access and no `npm
+install`/build step** on the target host.
 
 ```bash
-# 1. Build the UI (already built once into ui/dist/ in this delivery)
-cd ui
-npm install
-npm run build
-cp dist/* ../views/     # keep the views/ copy in sync - see quirk above
-
-# 2. Place the whole app-openapi_editor/ folder in IAP's services directory
-cd /opt/itential/platform/services
-git clone <your-repo> app-openapi_editor   # or copy this folder directly
-cd app-openapi_editor
-npm install       # installs the cog's dependencies (mongodb, @apidevtools/swagger-parser)
-
-# 3. Make sure ownership matches your other installed apps, e.g.:
-chown -R itential:itential /opt/itential/platform/services/app-openapi_editor
-
-# 4. Restart IAP
+rpm -ivh itential-openapi-editor-1.0.0-1.noarch.rpm
 systemctl restart pronghorn
-
-# 5. In Admin Essentials:
-#    - Configure the app's Service Instance properties (mongoProps) - see
-#      "Backend (cog) notes" above
-#    - Authorize a group (e.g. admin) for the app's roles
 ```
 
-The app will then appear in IAP's navigation as "OpenAPI Editor".
+If you only have the source tarball and spec file (not a prebuilt `.rpm`),
+build it yourself on any host with `rpmbuild`, `node` (>=18), and `npm`:
 
-## Verification performed
+```bash
+./build_rpm.sh /path/to/app-openapi_editor /path/to/app-integration_health_monitor
+# RPMs land in ./dist/
+```
 
-- `npm run build` (Webpack, production mode) completes with no errors from a
-  clean `npm install`, and produces a working `bundle.js` + `index.html`
-  (large bundle-size warnings from `swagger-ui-react` are expected, not
-  errors).
-- `src.js` was syntax-checked with `node -c`.
-- Confirmed working end-to-end against a live Platform 6 instance for
-  list/get/validate/save, including the Mongo auth and view-template
-  deployment issues documented above.
-- The OpenAPI 3.1.0 validation path and the new `swagger-ui-react` preview
-  have **not yet been tested against a live IAP instance** — only verified
-  to build successfully. Test both in a dev environment (try saving a 3.1.0
-  document, and confirm the live preview renders/updates as expected) before
-  relying on them in production.
+### Option B — Manual install from source
+
+1. Copy the app folder into Platform's services directory:
+   ```bash
+   cd /opt/itential/platform/services
+   # unzip/untar/git clone app-openapi_editor here
+   cd app-openapi_editor
+   npm install --omit=dev
+   ```
+2. Restart the platform:
+   ```bash
+   systemctl restart pronghorn
+   ```
+3. In **Admin Essentials → Applications**, confirm `app-openapi_editor` is
+   listed and create a **Service Instance** for it.
+4. Configure its properties (see [Configuration reference](#configuration-reference)
+   below) — an empty `{}` is a valid starting point.
+5. **Authorize** a group (e.g. `admin`) for the app's roles
+   (`admin`, `openapi_editor_user`) so it shows up in the left-hand
+   navigation as **OpenAPI Editor**.
+
+`[SCREENSHOT: Admin Essentials Applications page with app-openapi_editor
+listed and its Service Instance configuration panel open]`
+
+## Configuration reference
+
+All properties are **optional**. Everything under "Using the app" below
+works with no properties configured at all, because model/instance
+operations use your own browser session against Platform's REST API rather
+than a stored credential.
+
+| Property | Type | Required for | Notes |
+|---|---|---|---|
+| `mongoProps.host` / `.port` / `.database` | string/number | Legacy fallback reads only | Defaults to `127.0.0.1:27017` / `itential-master` if omitted |
+| `mongoProps.username` / `.password` | string | Only if your Mongo requires auth | See [Security](#security) — encrypt this |
+| `platformProps.baseUrl` | string | Test panel calls that resolve relative paths | Defaults to `http://127.0.0.1:3000` |
+| `platformProps.authMode` | `"none"` \| `"query"` \| `"header"` \| `"oauth2"` | Test panel auth overrides only | Has no effect on the direct-to-Platform model/instance operations |
+| `platformProps.username` / `.password` | string | `authMode` = username/password login | See [Security](#security) — encrypt this |
+| `platformProps.oauth.tokenUrl` / `.clientId` / `.clientSecret` / `.scope` / `.audience` | string | `authMode` = `"oauth2"` | See [Security](#security) — encrypt `clientSecret` |
+
+A starting template ships as `sampleProperties.json` in the app folder —
+copy it into the **inner** ("second") `properties` box in Admin Essentials'
+Service Instance configuration screen, then fill in only what you actually
+need.
+
+`[SCREENSHOT: Admin Essentials Service Instance properties form for
+app-openapi_editor, showing the mongoProps/platformProps fields]`
+
+## Using the app
+
+### Browsing and opening a model
+
+Open **OpenAPI Editor** from the left nav. The sidebar lists every
+Integration Model on the platform by name and version — search to narrow it
+down, then click one to load it into the editor.
+
+### Editing
+
+The right-hand pane is a real JSON editor (CodeMirror) with syntax
+highlighting. Panels are resizable — drag the divider between the sidebar,
+editor, and any open tab (Test, Operations, Integration Instances) to give
+yourself more room to work.
+
+`[SCREENSHOT: Resizable split-pane layout, mid-drag, showing the divider
+handle]`
+
+### Validating
+
+Click **Validate**. Each problem found is listed individually with its
+severity (blocking vs. minor vs. unknown) and, where locatable, the exact
+line — click an error to jump the editor to that line. Read the caveat
+banner: a failed validation is a strong signal, not a guarantee either way —
+test the actual behavior (via the Test panel or a real workflow run) before
+trusting or discarding the result.
+
+`[SCREENSHOT: Validation results panel with an expanded error showing
+severity badge, line number, and message text]`
+
+### Saving
+
+Click **Save**. Because Platform 6 has no supported in-place update for a
+model that already has Integration Instances attached, this runs a
+multi-step sequence — delete the affected instances, delete the model,
+re-create the model from your edited spec, re-create the instances — and
+shows you each step as it completes. You'll be offered a full backup
+download before this starts; take it.
+
+`[SCREENSHOT: Save confirmation modal showing the step-by-step plan and the
+"Download backup first" option]`
+
+### Backup / Restore / Delete (whole model)
+
+The toolbar buttons appear in this order deliberately — **Validate, Backup,
+Restore, Save, Delete** — least to most consequential, left to right.
+Hovering any of them shows a tooltip explaining exactly what it does.
+Restore and Delete both require you to retype the model's name to confirm.
+
+`[SCREENSHOT: Delete confirmation modal with the retype-to-confirm text field]`
+
+### Creating or importing a new model
+
+Use **New Model** to start from a blank template, or **Import** to load a
+`.json` file (an OpenAPI document, or a backup this app produced earlier).
+Either way, you'll see an authorization reminder afterward — a new model on
+its own doesn't grant anyone access to it; go authorize the appropriate
+group/role in Admin Essentials.
+
+`[SCREENSHOT: Post-import authorization reminder banner]`
+
+### Integration Instances tab
+
+Next to the Test tab. Lists every Integration Instance built from the
+currently open model. From here you can create a new instance, open one to
+edit its JSON directly, back it up, restore it from a prior backup, or
+delete it — each individually, independent of the whole-model operations
+above.
+
+`[SCREENSHOT: Integration Instances tab showing the instance list and one
+instance's JSON open for editing]`
+
+### Test panel
+
+Pick an operation from the searchable list, fill in parameters, choose an
+auth override if the target needs something different from what's in the
+spec (Basic, Bearer, OAuth2, or a two-step login flow with custom headers),
+and run it. Requests execute from this app's own server, so they aren't
+subject to your browser's CORS restrictions. Enable "Use curl" if you
+suspect axios and curl behave differently against a particular target
+(proxying, keep-alive, TLS defaults) — useful for diagnosis, not something
+you'll need day-to-day.
+
+`[SCREENSHOT: Test panel with an operation selected, parameters filled in,
+and a successful response shown below]`
+
+### Operations tab
+
+Browse every operation a model defines, and mark one as the **default
+health check call** — a small `x-health-monitor-default: true` extension
+written into the spec itself, which survives Platform's own model
+import/export. The companion Integration Health Monitor app reads this
+marker automatically when you set up a check against this model's
+integrations, so you don't have to pick an operation twice.
+
+## Security
+
+Treat this section as a checklist, not background reading.
+
+- **Encrypt every credential you configure.** `mongoProps.password`,
+  `platformProps.password`, `platformProps.authToken`, and
+  `platformProps.oauth.clientSecret` should never sit in Admin Essentials as
+  plaintext. Two supported paths, and you can mix them per field (but never
+  apply both to the *same* field — Platform will not double-encrypt):
+  - **Preferred, if HashiCorp Vault is configured on your Platform
+    instance**: just type the plaintext value into the field and save —
+    Vault encrypts it automatically, and this app never sees it in
+    plaintext outside of the single request that uses it.
+  - **Fallback, no Vault required**: the companion Health Monitor app ships
+    an `encryptValue` admin utility (`POST /health-monitor/encrypt-value`)
+    that returns an `$ENC...`-prefixed string using IAP's own
+    `PropertyEncryption` module — paste that into the property instead of
+    the plaintext.
+- **Model/instance operations run as you, not as a shared service
+  account.** Because this app calls Platform's REST API with your own
+  session cookie, whatever a user can see and change here is exactly what
+  they can see and change through Admin Essentials directly — this app adds
+  no privilege beyond what's already authorized. Scope the
+  `openapi_editor_user` role deliberately; don't hand it out more broadly
+  than you'd hand out direct Integration Model edit access.
+- **The Test panel can reach anything this app's server can reach.** If
+  you enable "skip TLS certificate verification" for a target, understand
+  that's a real reduction in transport security for that one call — use it
+  for internal/self-signed test targets only, never as a blanket setting for
+  production traffic.
+- **Backups contain full model/instance JSON**, which may include
+  non-secret but still sensitive configuration (internal URLs, service
+  names, structure). Treat downloaded backup files with the same handling
+  care as any other configuration export.
+- **This RPM ships with an npm-audit-clean dependency tree** at time of
+  packaging (`npm audit` reports 0 vulnerabilities against the bundled
+  production `node_modules`, both the cog and the built UI's runtime
+  dependencies). The one flagged item in the *development* toolchain
+  (`webpack-dev-server`, used only by `npm start` for local UI development)
+  is a devDependency that is never bundled into the built UI or this RPM —
+  it has no runtime exposure in a deployed instance. Re-run `npm audit` for
+  yourself before every release; dependency trees drift.
+
+## Troubleshooting
+
+**"Couldn't load model... did not include a full OpenAPI document
+(openapi/paths)"** — Platform's plain `GET /integration-models/:id` only
+returns a summary shape, not the full spec; this app tries the `/export`
+variant first. If you see this, the export endpoint may have returned an
+unexpected shape on your Platform version — check the browser console for
+the raw response logged there and compare against what this app expects in
+`ui/src/api.js`'s `extractSpec()`.
+
+**Save fails with a Mongo connection error
+(`MongoServerSelectionError`)** — Save uses Platform's own REST API, not a
+direct database write; a Mongo error here means something is still falling
+back to a legacy path. Confirm you're on the current build of this app (the
+rearchitected version removed the direct-Mongo save path entirely).
+
+**Recreating an Integration Instance fails with "Currently this feature is
+not supported for services of type..."** — the entire instance payload must
+be wrapped one level deeper, under a `properties` key, when calling
+Platform's `POST /integrations`. This app does this correctly as shipped; if
+you've modified `ui/src/api.js`, check that wrapping is still intact.
+
+**Validation says there's an error but nothing is highlighted in the
+editor** — this was a real, fixed bug: `$ref`-style errors reference a
+pointer string (like `#/components/schemas/Foo`) that never appears
+standalone-quoted in the document, so a naive quoted-string search for the
+error's "segment" would silently find nothing. Confirm you're on a build
+where `ui/src/util/validateHints.js` does a plain substring search, not a
+quoted one.
+
+**Integration Instances tab loads data (network tab shows a 200) but shows
+a blank panel** — also a real, fixed bug: a missing `flex: 1 1 auto` /
+`min-height: 0` down the `.integration-instances-*` container chain
+collapsed the CodeMirror instance to zero height. Data was never the
+problem; layout was.
+
+**A model import or restore "succeeded" but nobody can see the new
+model/instance** — expected, not a bug: creating something doesn't
+automatically authorize anyone to use it. Go to Admin Essentials and
+authorize the relevant group for the model/instance, same as you would for
+one created directly in Admin Essentials.
+
+## Uninstalling
+
+```bash
+rpm -e itential-openapi-editor
+systemctl restart pronghorn
+```
+
+Uninstalling this app does **not** touch the Integration Models or
+Integration Instances it created or edited — those live in Platform's own
+storage, managed through Platform's own sanctioned APIs, exactly as if
+they'd been created through Admin Essentials. Only this app's own service
+directory is removed.
